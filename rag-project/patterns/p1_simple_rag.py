@@ -177,7 +177,11 @@ def rag_p1(question: str) -> dict:
         "answer":   answer,
         "contexts": [d.page_content for d in docs_used]
     }
-
+q="what is the problem being addressed?"
+print("\nQuestion\n")
+print(q)
+print("\nAnswer\n")
+print(rag_p1(q))
 
 # cmd-o/p:
 
