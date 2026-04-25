@@ -29,7 +29,7 @@ def section(title: str):
 # ═══════════════════════════════════════════════════════════════
 section("STEP 1 — LOAD DOCUMENT")
 
-pdf_path = os.path.join(os.path.dirname(__file__), "../data/llama2_tech_report.pdf")
+pdf_path = os.path.join(os.path.dirname(__file__), "../data/oldman_and_the_sea.pdf")
 docs = PyPDFLoader(pdf_path).load()
 
 print(f"  Pages loaded     : {len(docs)}")
@@ -90,8 +90,7 @@ print(f"  Sample vector[:5] : {[round(x, 4) for x in sample_vector[:5]]}")
 # ═══════════════════════════════════════════════════════════════
 section("STEP 4 — RETRIEVAL (semantic search)")
 
-# QUESTION = "What safety measures were used in Llama 2?"
-QUESTION = "Who are the authors of the document?"
+QUESTION = "How many days had the old man gone without taking a fish?"
 
 retriever   = vectordb.as_retriever(search_kwargs={"k": 4})
 raw_results = vectordb.similarity_search_with_score(QUESTION, k=4)
@@ -177,7 +176,7 @@ def rag_p1(question: str) -> dict:
         "answer":   answer,
         "contexts": [d.page_content for d in docs_used]
     }
-q="what is the problem being addressed?"
+q="tell me about old man?"
 print("\nQuestion\n")
 print(q)
 print("\nAnswer\n")

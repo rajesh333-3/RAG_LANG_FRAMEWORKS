@@ -173,4 +173,72 @@ condenser_chain = condenser_prompt | llm | StrOutputParser()
 
 ---
 
-## P3 — *(coming next)*
+## P3 — Branched RAG
+
+**File:** `patterns/p3_branched_rag.py`
+**Embedding:** `all-MiniLM-L6-v2` (local, reuses P1 index)
+**LLM:** `gpt-4o-mini`
+**New concepts:** `JsonOutputParser`, decompose chain, synthesise chain
+
+### Problem with P1/P2 for complex questions
+
+A single retrieval call fetches 4 chunks — likely all from one section, missing others:
+
+```
+"What is Landmark Embedding, how does it work, and what experiments validated it?"
+        │
+        ▼
+retriever → 4 chunks from intro section only  ✗  (misses methods + experiments)
+```
+
+### Fix — Decompose → retrieve per sub-Q → synthesise
+
+```
+complex question
+     │
+     ▼
+DECOMPOSE → ["What is it?", "How does it work?", "What experiments?"]
+     │
+     ├──► sub-q 1 → RETRIEVE → RAG CHAIN → sub-answer 1
+     ├──► sub-q 2 → RETRIEVE → RAG CHAIN → sub-answer 2
+     └──► sub-q 3 → RETRIEVE → RAG CHAIN → sub-answer 3
+     │
+     ▼
+SYNTHESISE → final coherent answer
+```
+
+### Key concepts
+
+- `JsonOutputParser` — instead of returning a string like `StrOutputParser`, it parses the LLM output as JSON and returns a native Python object (here: a list of strings). The LLM must be instructed to output valid JSON
+- Decompose chain: `{question}` → `["sub-q1", "sub-q2", ...]` (Python list)
+- Each sub-question runs through the same RAG chain as P1, independently — different chunks retrieved per sub-question
+- Synthesise chain sees: original question + all `Q: ...\nA: ...` pairs → one final answer
+- Total chunks = N sub-questions × 4 — broader document coverage than a single retrieval
+
+### Chain construction
+
+```python
+# Returns a Python list, not a string
+decompose_chain = (
+    ChatPromptTemplate.from_template("...Return a JSON array...")
+    | llm
+    | JsonOutputParser()   # ← str → list
+)
+
+# Runs once per sub-question (same as P1)
+rag_chain = (
+    {"context": retriever | join_lambda, "question": RunnablePassthrough()}
+    | rag_prompt | llm | StrOutputParser()
+)
+
+# Combines all sub-answers
+synthesise_chain = (
+    ChatPromptTemplate.from_template("...{original}...{sub_answers}...")
+    | llm
+    | StrOutputParser()
+)
+```
+
+---
+
+## P4 — *(coming next)*

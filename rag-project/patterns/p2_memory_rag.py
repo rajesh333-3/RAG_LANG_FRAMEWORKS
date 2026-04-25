@@ -24,7 +24,7 @@ def section(title: str):
 # ═══════════════════════════════════════════════════════════════
 section("STEPS 1-3 — LOAD, SPLIT, EMBED (reusing P1 index)")
 
-pdf_path   = os.path.join(os.path.dirname(__file__), "../data/llama2_tech_report.pdf")
+pdf_path   = os.path.join(os.path.dirname(__file__), "../data/oldman_and_the_sea.pdf")
 docs       = PyPDFLoader(pdf_path).load()
 splitter   = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=50)
 chunks     = splitter.split_documents(docs)
@@ -125,10 +125,10 @@ section("STEP 6 — MULTI-TURN CONVERSATION DEMO")
 chat_history = []
 
 conversation = [
-    "What method does this paper propose?",
-    "How does it compare to chunking-based retrieval?",
-    "Who funded that research?",       # "that" refers to the paper — needs rewriting
-    "What were its main limitations?", # "its" refers to the method — needs rewriting
+    "What is old man and what is his story?",
+    "Who is the boy and what is his relationship with him?",   # "him" needs rewriting
+    "How many days had he gone without catching a fish?",           # "he" needs rewriting
+    "What does he dream about at night?",                      # "he" needs rewriting
 ]
 
 def chat(question: str) -> str:
