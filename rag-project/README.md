@@ -367,4 +367,141 @@ This generates a JSON schema description that gets injected into the prompt so t
 
 ---
 
-## P6 — *(coming next)*
+## langgraph_101.py — LangGraph anatomy (read before P6)
+
+**File:** `patterns/langgraph_101.py`
+
+A runnable tutorial covering every LangGraph primitive used in P6–P8.
+
+| Thing | What it is | Key rule |
+|---|---|---|
+| `State` | TypedDict shared by all nodes | init ALL fields in `invoke()` |
+| `Node` | `fn(state) → dict` | return ONLY changed fields |
+| `Edge` | `add_edge(A, B)` | A always goes to B |
+| Cond. edge | `fn(state) → str → node` | this is how loops work |
+| `END` | special constant | graph stops here |
+| `compile()` | validates + returns app | `app.invoke()` = `chain.invoke()` |
+
+The loop pattern (impossible with chains):
+```python
+wf.add_edge("rewrite", "retrieve")          # goes BACKWARDS
+wf.add_conditional_edges("grade", fn, {
+    "retry": "rewrite"                       # fn can return "retry"
+})
+```
+
+---
+
+## P6 — CRAG (Corrective RAG)
+
+**File:** `patterns/p6_crag.py`
+**Embedding:** `all-MiniLM-L6-v2` (local, reuses P1 index)
+**LLM:** `gpt-4o-mini`
+**New concepts:** `StateGraph`, `add_conditional_edges`, corrective loop
+
+### Problem with P1
+
+P1 is a linear chain: retrieve → prompt → generate. If retrieved chunks are irrelevant, P1 still generates — likely hallucinated. There's no way to check, retry, or refuse within a chain.
+
+### Fix — Grade → loop → refuse
+
+```
+START → retrieve → grade ──► relevant      → generate → END
+                    │
+                    ├──► irrelevant (retries<2) → rewrite → retrieve  (LOOP)
+                    │
+                    └──► irrelevant (retries≥2) → refuse  → END
+```
+
+### State
+
+```python
+class CRAGState(TypedDict):
+    question:  str    # may be rewritten by node_rewrite
+    documents: list   # filled by node_retrieve
+    grade:     str    # "relevant" | "irrelevant"
+    answer:    str    # filled by generate or refuse
+    retries:   int    # loop counter, max 2
+```
+
+### The loop — what makes this impossible as a chain
+
+```python
+wf.add_edge("rewrite", "retrieve")   # BACKWARDS arrow = loop
+wf.add_conditional_edges("grade", route_after_grade, {
+    "generate": "generate",
+    "rewrite":  "rewrite",            # bad grade → go back
+    "refuse":   "refuse",
+})
+```
+
+### Demo results
+
+```
+"How many days without fish?" → relevant on first try → answer: "Eighty-seven days"  (0 retries)
+"What does he think at night?" → irrelevant → rewrite x2 → relevant → answer found   (2 retries)
+"Population of Cuba?"          → irrelevant → rewrite x2 → still off-topic → refuse  (2 retries)
+```
+
+### Key rule — nodes return only what they changed
+
+```python
+def node_retrieve(state: CRAGState) -> dict:
+    docs = retriever.invoke(state["question"])
+    return {"documents": docs}   # only this field — LangGraph merges the rest
+```
+
+---
+
+## P7 — Self-RAG
+
+**File:** `patterns/p7_self_rag.py`
+**Embedding:** `all-MiniLM-L6-v2` (local, reuses P1 index)
+**LLM:** `gpt-4o-mini`
+**New concepts:** answer grading node, graph extension pattern, negative prompting, `Literal` type
+
+### Problem with P6
+
+CRAG grades documents but not the answer. The LLM can still hallucinate from relevant docs:
+```
+Docs:   "Santiago caught the marlin on day 3 at sea"
+Answer: "Santiago caught the marlin and sold it for $500"  ← Gate 1 passes, Gate 2 catches this
+```
+
+### Fix — Add Gate 2 (answer grade)
+
+```
+P6: generate → END
+P7: generate → grade_answer → END           (faithful)
+                             → regen_strict → END   (hallucinated)
+```
+
+### Graph extension pattern
+
+P7 doesn't rewrite P6 — it extends it. The pattern:
+1. Add new fields to State (`ans_grade`, `violations`)
+2. Write new node functions (`node_grade_answer`, `node_regen_strict`)
+3. Rewire one edge (`generate→END` becomes `generate→grade_answer`)
+4. Add new conditional edge from `grade_answer`
+
+### Key concepts
+
+- **Negative prompting** — `node_regen_strict` passes the violations list explicitly: `"Do NOT include: X, Y, Z"`. More reliable than just `"be faithful"` — the LLM knows exactly what to avoid
+- **`violations: list[str]`** — the grader extracts specific unsupported claims, not just a bool. These feed back into the regen prompt
+- **`Literal["faithful", "hallucinated"]`** — inline Pydantic type constraint. Same as `Enum` but declared directly in the field. Use `Enum` when the values are reused across models; `Literal` for one-off constraints
+- **Two quality gates** — Gate 1 (doc grade) + Gate 2 (answer grade). Either can loop/refuse independently
+
+### Real-world lesson from the run
+
+The grader flagged `"Eighty-four days."` as hallucinated — not because it was wrong, but because it "lacks context." **Grader prompt engineering matters as much as the graph architecture.** A poorly tuned grader causes false positives → unnecessary regen → higher latency and cost. Always evaluate your grader's precision/recall separately.
+
+### State additions
+
+```python
+ans_grade:  str    # "faithful" | "hallucinated"
+violations: list   # ["claim 1 not in context", "claim 2 not in context"]
+```
+
+---
+
+## P8 — *(coming next)*
