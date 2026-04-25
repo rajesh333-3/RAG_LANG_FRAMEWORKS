@@ -335,9 +335,9 @@ test_cases = [
     ("Factual — should pass both gates",
      "How many days had the old man gone without catching a fish?"),
     ("Interpretive — answer grade may catch over-reaching",
-     "What motivates old man to keep fighting the fish from shark attacks?"),
+     "old man and shark ?"),
     ("Off-topic — should refuse",
-     "What year was Ernest Hemingway born?"),
+     "What year was old man born?"),
 ]
 
 for label, question in test_cases:
