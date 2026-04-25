@@ -183,6 +183,10 @@ print(q)
 print("\nAnswer\n")
 print(rag_p1(q))
 
+# from eval.benchmark import run_benchmark
+# run_benchmark(rag_p1, "p1_simple_rag")
+
+
 # cmd-o/p:
 
 # (venv) rajeshtvd@Rajeshs-MacBook-Air rag-project % python patterns/p1_simple_rag.py
