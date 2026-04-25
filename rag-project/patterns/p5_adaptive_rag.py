@@ -1,5 +1,4 @@
 import os
-import sys
 from enum import Enum
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
