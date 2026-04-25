@@ -241,4 +241,130 @@ synthesise_chain = (
 
 ---
 
-## P4 — *(coming next)*
+## P4 — HyDE + Semantic Chunking
+
+**File:** `patterns/p4_hyde.py`
+**Embedding:** `all-MiniLM-L6-v2` (local, own index at `index/p4/`)
+**LLM:** `gpt-4o-mini`
+**New concepts:** `SemanticChunker`, `embed_query()`, `similarity_search_by_vector()`
+
+### Two problems solved together
+
+**Problem 1 — Fixed chunking (P1) cuts mid-idea:**
+`RecursiveCharacterTextSplitter` splits at 512 chars regardless of meaning. A sentence spanning a topic boundary gets cut wherever the counter hits 512.
+
+**Problem 2 — Query/document language mismatch:**
+User asks: `"what keeps him going?"` → conversational, short
+Document says: `"he relies on his will and prayers…"` → formal prose
+These embed to different vectors → poor retrieval on vague queries.
+
+### Fix 1 — SemanticChunker
+
+```
+P1: 319 chunks, avg 440 chars  (fixed-size, blind to meaning)
+P4: 153 chunks, avg 909 chars  (topic-aware boundaries)
+```
+
+`SemanticChunker` embeds each sentence, computes cosine similarity between adjacent sentences, and inserts a boundary wherever similarity drops sharply (topic shift). Fewer, larger, more coherent chunks.
+
+`breakpoint_threshold_type="percentile"` — boundary inserted at the sharpest similarity drops (bottom 70th percentile of all drops).
+
+### Fix 2 — HyDE (Hypothetical Document Embeddings)
+
+```
+Standard:  question  ──► embed ──► search ──► chunks
+HyDE:      question  ──► LLM generates hypothesis paragraph
+                         ──► embed hypothesis ──► search ──► chunks
+```
+
+The hypothesis is written in document-like language → its embedding is much closer to real document chunks → better recall on vague queries.
+
+### Key methods
+
+- `embed_query(text)` — embeds a string, returns `list[float]` (the raw vector)
+- `similarity_search_by_vector(vector, k)` — searches FAISS with a pre-computed vector instead of a string. Used because we embed the hypothesis ourselves before searching.
+- `temperature=0.2` on hyde_chain — slightly creative so it generates natural prose, not a robotic answer
+
+### Why rag_chain differs from P1–P3
+
+In P1–P3, the chain fan-out `{"context": retriever | lambda, "question": RunnablePassthrough()}` handles retrieval internally. In P4, retrieval is done externally (either standard or HyDE path), so the chain is simplified — it just takes a pre-joined context string + question directly.
+
+---
+
+## P5 — Adaptive RAG
+
+**File:** `patterns/p5_adaptive_rag.py`
+**Embedding:** `all-MiniLM-L6-v2` (local, reuses P1 index)
+**LLM:** `gpt-4o-mini`
+**New concepts:** `PydanticOutputParser`, `Enum` routing, `BaseModel` schema
+
+### Problem
+
+Not every question needs the same strategy — or any retrieval at all:
+
+```
+"Hi!"                   → no FAISS needed       (P1 wastes a search call)
+"What is 2+2?"          → no FAISS needed
+"Who is Santiago?"      → simple lookup
+"Dreams + days + shark" → needs branched strategy
+"Give me a recipe"      → should be refused
+```
+
+### Fix — Classify first, then route
+
+```
+question
+     │
+     ▼
+ROUTER → RouteDecision(route=Route.SIMPLE, reason="single fact lookup")
+     │
+     ├── no_retrieval → LLM direct        (0 FAISS calls)
+     ├── simple       → P1 chain          (1 FAISS call)
+     ├── branched     → P3 chain          (N FAISS calls)
+     └── refuse       → static message   (0 LLM calls)
+```
+
+### PydanticOutputParser vs JsonOutputParser
+
+| | JsonOutputParser (P3) | PydanticOutputParser (P5) |
+|---|---|---|
+| Returns | raw `dict` | typed Python object |
+| Validation | none | Pydantic enforces types |
+| Enum constraint | no | yes — wrong value → error |
+| Access | `result["route"]` | `result.route` |
+
+### Schema definition
+
+```python
+class Route(str, Enum):
+    NO_RETRIEVAL = "no_retrieval"
+    SIMPLE       = "simple"
+    BRANCHED     = "branched"
+    REFUSE       = "refuse"
+
+class RouteDecision(BaseModel):
+    route:  Route = Field(description="Which route to take")
+    reason: str   = Field(description="One sentence justification")
+```
+
+### Key concept — `get_format_instructions()`
+
+```python
+router_parser = PydanticOutputParser(pydantic_object=RouteDecision)
+router_parser.get_format_instructions()  # → JSON schema string
+```
+
+This generates a JSON schema description that gets injected into the prompt so the LLM knows exactly what structure to return. The parser then validates the response against the schema — if `route` is not one of the 4 enum values, Pydantic raises a `ValidationError`.
+
+### Demo results
+
+```
+"Hello!"             → no_retrieval  (0 chunks)
+"How many days..."   → simple        (4 chunks)
+"Dreams + Manolin…"  → branched      (12 chunks)
+"Recipe for marlin"  → refuse        (0 chunks, 0 LLM calls)
+```
+
+---
+
+## P6 — *(coming next)*
