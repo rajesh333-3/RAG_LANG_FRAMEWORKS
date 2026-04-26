@@ -565,3 +565,125 @@ No separate `AgentExecutor` — the compiled graph IS the executor, consistent w
 - **`create_agent`** — wires LLM + tools into a compiled ReAct graph
 - **`.stream()`** — yields each step live: `[Action]`, `[Observation]`, `[Final Answer]`. Use instead of `.invoke()` when you want to watch the loop or stream to a UI
 - **Two tool calls on one question** — the agent called `search_book` twice for the second question (days + dreams) without being told to. The LLM decided independently
+
+---
+
+## P9 — Multimodal RAG
+
+**File:** `patterns/p9_multimodal_rag.py`
+**PDF:** `llama2_tech_report.pdf` (a technical paper with architecture diagrams + performance charts)
+**Embedding (text):** `all-MiniLM-L6-v2` (384-dim, same as P1)
+**Embedding (image):** CLIP `openai/clip-vit-base-patch32` (512-dim, shared text+image space)
+**Vision LLM:** `gpt-4o-mini` (supports vision, no need for full `gpt-4o`)
+
+### Why P1–P8 fail on visual content
+
+Standard RAG ingests text only. A technical paper has:
+- Architecture diagrams (e.g., model overview on page 6)
+- Results tables rendered as images (page 12)
+- Performance charts (pages 13–14)
+
+P1 would retrieve the text *around* a figure — "See Figure 3" — but not the figure itself. The LLM gets the caption, not the diagram. For any visual information (architecture, benchmark plots), the answer is incomplete or fabricated.
+
+### Fix: two parallel retrieval gates
+
+```
+question
+     │
+     ├──► text_retriever (MiniLM, 384-dim)  → top-3 text chunks
+     │
+     ├──► retrieve_images (CLIP, 512-dim)   → top-2 matching images
+     │
+     └──► GPT-4o vision message
+              │
+              ├── text context + question   (type: "text")
+              └── images as base64          (type: "image_url")
+                   │
+                   ▼
+              answer — can describe diagrams AND cite text
+```
+
+### CLIP — why it enables text→image retrieval
+
+CLIP (Contrastive Language-Image Pretraining) was trained on 400M (text, image) pairs. Its key property:
+
+> Text and images land in the **same 512-dim vector space**.
+
+"attention mechanism diagram" (text query) and an actual attention diagram image will have similar embeddings. That's what makes semantic image retrieval possible — you embed the query as text and compare against image embeddings using cosine similarity.
+
+```python
+# Both functions return 512-dim L2-normalised vectors in the same CLIP space
+embed_image(b64)        # PIL image  → 512-dim vector
+embed_text_clip(text)   # string     → 512-dim vector
+
+# Retrieval = dot product (cosine sim of normalised vectors)
+scores = [np.dot(q_vec, img["emb"]) for img in img_store]
+```
+
+**Important:** MiniLM (384-dim) and CLIP (512-dim) are completely separate vector spaces. Never mix them. Text retrieval uses MiniLM; image retrieval uses CLIP.
+
+### Vision message format
+
+GPT-4o and GPT-4o-mini accept multimodal content in a single message:
+
+```python
+content = [
+    {
+        "type": "text",
+        "text": f"Context:\n{text_context}\n\nQuestion: {question}"
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{img['b64']}"}
+    },
+    # ... more images
+]
+messages = [{"role": "user", "content": content}]
+llm.invoke(messages)
+```
+
+The model reads the text context AND visually processes the images in a single LLM call.
+
+### Image extraction with pymupdf (fitz)
+
+`pymupdf` (imported as `fitz`) extracts embedded images directly from the PDF — no OCR, no system dependencies.
+
+```python
+import fitz
+doc = fitz.open(pdf_path)
+for page in doc:
+    for img in page.get_images():
+        xref = img[0]
+        pix  = fitz.Pixmap(doc, xref)
+        if pix.n > 4:                  # CMYK → convert to RGB
+            pix = fitz.Pixmap(fitz.csRGB, pix)
+        if pix.width < 200 or pix.height < 200:
+            continue                   # skip decorative icons
+```
+
+Why pymupdf over `unstructured hi_res`:
+- `unstructured`: needs detectron2 + tesseract + poppler (~2 GB, complex install)
+- `pymupdf`: `pip install pymupdf`, pure Python, same image extraction result
+
+PDF had 5 meaningful images (after filtering icons <200px) on pages 6, 7, 12, 13, 14.
+
+### transformers v5 API change
+
+In transformers v5, `get_image_features()` and `get_text_features()` return `BaseModelOutputWithPooling`, not a plain tensor. You must use `.pooler_output`:
+
+```python
+# Old (transformers <5):
+vec = feats[0].numpy()
+
+# New (transformers v5):
+vec = feats.pooler_output[0].numpy()   # ← .pooler_output required
+```
+
+### Key concepts
+
+- **CLIP shared vector space** — trained on (text, image) pairs → semantic similarity across modalities
+- **Two separate indexes** — MiniLM for text (384-dim), CLIP cosine similarity for images (512-dim); never mix
+- **pymupdf** — lightweight PDF image extraction, one pip install, no system deps
+- **Vision message format** — text + base64 images in the same `content` list; `gpt-4o-mini` handles both
+- **Pre-compute image embeddings** — embed all images once at startup, not per query (CLIP is slow)
+- **Filter small images** — skip anything under ~200px to avoid decorative icons polluting the image index
