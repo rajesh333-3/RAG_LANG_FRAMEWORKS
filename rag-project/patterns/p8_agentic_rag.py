@@ -294,3 +294,5 @@ def rag_p8(question: str) -> dict:
         "answer":   final,
         "contexts": [],   # agent doesn't expose retrieved docs directly
     }
+
+print(rag_p8("who attacked old man in the sea after he catched a big fish?"))
