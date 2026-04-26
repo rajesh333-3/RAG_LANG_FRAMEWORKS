@@ -504,4 +504,64 @@ violations: list   # ["claim 1 not in context", "claim 2 not in context"]
 
 ---
 
-## P8 — *(coming next)*
+## P8 — Agentic RAG
+
+**File:** `patterns/p8_agentic_rag.py`
+**Embedding:** `all-MiniLM-L6-v2` (local, reuses P1 index)
+**LLM:** `gpt-4o-mini`
+**New concepts:** `@tool` decorator, `create_agent`, ReAct loop, `.stream()`
+
+### The shift
+
+| | P1–P7 | P8 |
+|---|---|---|
+| Recipe | You write it (fixed steps) | LLM writes it on the fly |
+| Path | Always the same | Changes per question |
+| Tools | One strategy hardcoded | LLM picks from a menu |
+
+### ReAct loop (Reason + Act)
+
+```
+Question: "How many days without fish, and how many hours is that?"
+
+[Action]       search_book("Santiago go without catching a fish")
+[Observation]  "...eighty-seven days..."
+[Action]       calculate("87 * 24")
+[Observation]  2088
+[Final Answer] Santiago went 87 days = 2,088 hours without catching a fish.
+```
+
+### `@tool` — docstring is the prompt
+
+```python
+@tool
+def search_book(query: str) -> str:
+    """Search The Old Man and the Sea for specific facts, quotes, events,
+    or character details. Use for precise factual lookups from the book."""
+    docs = retriever.invoke(query)
+    return "\n\n".join(d.page_content for d in docs)
+```
+
+The LLM sees only the **name + docstring** to decide when to call the tool. The implementation is invisible. Treat docstrings with the same care as prompts.
+
+### LangChain 1.x API change
+
+```python
+# Old (LangChain 0.x):
+from langchain.agents import create_react_agent, AgentExecutor
+
+# New (LangChain 1.x):
+from langchain.agents import create_agent   # returns compiled StateGraph directly
+agent = create_agent(model=llm, tools=tools)
+agent.invoke({"messages": [{"role": "user", "content": question}]})
+agent.stream(...)   # yields each tool call + LLM step live
+```
+
+No separate `AgentExecutor` — the compiled graph IS the executor, consistent with P6/P7.
+
+### Key concepts
+
+- **`@tool`** — decorator that registers a Python function as a tool. Docstring = routing instruction for the LLM
+- **`create_agent`** — wires LLM + tools into a compiled ReAct graph
+- **`.stream()`** — yields each step live: `[Action]`, `[Observation]`, `[Final Answer]`. Use instead of `.invoke()` when you want to watch the loop or stream to a UI
+- **Two tool calls on one question** — the agent called `search_book` twice for the second question (days + dreams) without being told to. The LLM decided independently
