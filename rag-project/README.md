@@ -687,3 +687,137 @@ vec = feats.pooler_output[0].numpy()   # ← .pooler_output required
 - **Vision message format** — text + base64 images in the same `content` list; `gpt-4o-mini` handles both
 - **Pre-compute image embeddings** — embed all images once at startup, not per query (CLIP is slow)
 - **Filter small images** — skip anything under ~200px to avoid decorative icons polluting the image index
+- **Per-document index** — index path is derived from the PDF filename (`index/p9_<pdf_stem>/`) so swapping documents never mixes embeddings
+
+---
+
+## P10 — Graph RAG
+
+**File:** `patterns/p10_graph_rag.py`
+**PDF:** `oldman_and_the_sea.pdf`
+**Graph DB:** Neo4j (Bolt port 7687, browser at `http://localhost:7474`)
+**LLM:** `gpt-4o-mini`
+**New packages:** `langchain-neo4j`, `langchain-experimental`
+
+### Why Graph RAG
+
+Vector search finds chunks that *sound like* the question. It cannot answer relational questions:
+
+- "Who is Santiago's companion?" — requires following a `COMPANION_OF` edge
+- "What does the old man dream about?" — requires traversing `DREAMS_OF` relationships
+- "What connects A to B?" — requires graph traversal, not similarity
+
+Graph RAG builds a structured entity map at ingest time. At query time it traverses that map.
+
+```
+Vector RAG : chunk ↔ chunk  (proximity in embedding space)
+Graph RAG  : entity → relationship → entity  (structured traversal)
+```
+
+### Pipeline
+
+```
+INGEST TIME
+  chunks
+    │
+    ▼
+  LLMGraphTransformer (GPT-4o-mini per chunk)
+    → extracts: nodes (Person, Fish, Place, ...) + edges (COMPANION_OF, DREAMS_OF, ...)
+    │
+    ▼
+  Neo4j — stores the entity graph
+
+QUERY TIME
+  question
+    │
+    ▼
+  LLM 1: question + graph schema → Cypher query
+    │
+    ▼
+  Neo4j runs Cypher → structured rows
+    │
+    ▼
+  LLM 2: rows + question → natural language answer
+    │
+    ▼
+  If empty/failure → fall back to P7 Self-RAG
+```
+
+### LLMGraphTransformer
+
+Sends each chunk to the LLM with a structured extraction prompt. Returns nodes and directed edges.
+
+```python
+transformer = LLMGraphTransformer(
+    llm=llm,
+    allowed_nodes=["Person", "Fish", "Animal", "Place", "Boat", "Concept"],
+    allowed_relationships=["COMPANION_OF", "PURSUES", "CATCHES", "DREAMS_OF", ...],
+)
+graph_docs = transformer.convert_to_graph_documents(chunks)
+graph.add_graph_documents(graph_docs, include_source=True)
+```
+
+**Why constrain the schema?** Without `allowed_nodes`, the LLM labels the same entity as "Person", "Man", "Character", "Human" across chunks. Cypher exact-matches by label — inconsistency breaks every query. Constrained schema = consistent labels = reliable traversal.
+
+### Fuzzy Cypher matching — the critical fix
+
+The default chain generates exact id matches: `MATCH (p:Person {id: 'Santiago'})`. This fails because the same person was extracted as "Old Man", "The Old Man", "He", "Santiago" across chunks.
+
+Fix: a custom Cypher generation prompt that forces `CONTAINS` matching:
+
+```python
+# Bad (default) — exact match, misses 3 out of 4 variants:
+MATCH (p:Person {id: 'Santiago'})-[:COMPANION_OF]->(c) RETURN c
+
+# Good (custom prompt) — case-insensitive fuzzy match:
+MATCH (p:Person)-[:COMPANION_OF]->(c)
+WHERE toLower(p.id) CONTAINS 'santiago'
+RETURN c
+```
+
+### Fallback to Self-RAG
+
+Graph is better for relational questions. Vector is better for semantic/open-ended ones. The pipeline tries graph first; if Cypher returns empty or "I don't know", it falls back to `rag_p7()`:
+
+```python
+def rag_p10(question):
+    result = cypher_chain.invoke({"query": question})
+    if "don't know" in result["result"].lower() or not result["result"]:
+        return rag_p7(question)   # fall back to Self-RAG
+    return {"answer": result["result"], "source": "graph"}
+```
+
+### LangChain 1.x API change
+
+`Neo4jGraph` and `GraphCypherQAChain` moved out of `langchain_community` into the dedicated `langchain-neo4j` package:
+
+```python
+# Old:
+from langchain_community.graphs import Neo4jGraph
+from langchain.chains import GraphCypherQAChain
+
+# New:
+from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
+```
+
+### Neo4j setup
+
+```bash
+# Neo4j Desktop: download from neo4j.com/download, create a local instance, install APOC plugin
+# APOC is required — Neo4jGraph uses it to read the graph schema
+
+# .env:
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=<your_password>
+```
+
+### Key concepts
+
+- **LLMGraphTransformer** — GPT-4o reads text → structured (node, edge) pairs stored in Neo4j
+- **Cypher** — graph query language; like SQL but for traversing nodes and edges
+- **GraphCypherQAChain** — two LLM calls: (1) NL → Cypher, (2) rows → natural language answer
+- **Schema constraint** — `allowed_nodes`/`allowed_relationships` prevents label inconsistency at extraction time
+- **Fuzzy CONTAINS** — use `WHERE toLower(n.id) CONTAINS 'name'` instead of exact `{id: 'Name'}` matching
+- **Graph + Vector hybrid** — graph for relational questions, vector fallback for semantic ones; best systems use both
+- **APOC plugin** — required by `Neo4jGraph.refresh_schema()`; install via Neo4j Desktop → Plugins tab
